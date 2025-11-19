@@ -1,14 +1,15 @@
-use std::{ffi::c_void, mem};
+use std::{ffi::c_void, mem, ptr};
 
 use image::{DynamicImage, RgbaImage};
 use scopeguard::guard;
+use windows::core::PCWSTR;
 use windows::Win32::{
     Foundation::{GetLastError, HWND},
     Graphics::{
         Dwm::DwmIsCompositionEnabled,
         Gdi::{
             BITMAP, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
-            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetCurrentObject,
+            CreateCompatibleDC, CreateDCW, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetCurrentObject,
             GetDIBits, GetObjectW, GetWindowDC, HBITMAP, HDC, OBJ_BITMAP, ReleaseDC, SRCCOPY,
             SelectObject,
         },
@@ -76,49 +77,71 @@ fn delete_bitmap_object(val: HBITMAP) {
 
 #[allow(unused)]
 pub fn capture_monitor(x: i32, y: i32, width: i32, height: i32) -> XCapResult<RgbaImage> {
-    unsafe {
-        let hwnd = GetDesktopWindow();
-        let scope_guard_hdc_desktop_window = guard(GetWindowDC(Some(hwnd)), |val| {
-            if ReleaseDC(Some(hwnd), val) != 1 {
-                log::error!("ReleaseDC({:?}) failed: {:?}", val, GetLastError());
-            }
-        });
+    capture_device(x, y, width, height, None)
+}
 
-        // 内存中的HDC，使用 DeleteDC 函数释放
-        // https://learn.microsoft.com/zh-cn/windows/win32/api/wingdi/nf-wingdi-createcompatibledc
-        let scope_guard_mem = guard(
-            CreateCompatibleDC(Some(*scope_guard_hdc_desktop_window)),
-            |val| {
+pub fn capture_device(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    device: Option<PCWSTR>,
+) -> XCapResult<RgbaImage> {
+    unsafe {
+        let capture_from_dc = |hdc: HDC, x: i32, y: i32| -> XCapResult<RgbaImage> {
+            // 内存中的HDC，使用 DeleteDC 函数释放
+            // https://learn.microsoft.com/zh-cn/windows/win32/api/wingdi/nf-wingdi-createcompatibledc
+            let scope_guard_mem = guard(CreateCompatibleDC(Some(hdc)), |val| {
                 if !DeleteDC(val).as_bool() {
                     log::error!("DeleteDC({:?}) failed: {:?}", val, GetLastError());
                 }
-            },
-        );
+            });
 
-        let scope_guard_h_bitmap = guard(
-            CreateCompatibleBitmap(*scope_guard_hdc_desktop_window, width, height),
-            delete_bitmap_object,
-        );
+            let scope_guard_h_bitmap = guard(
+                CreateCompatibleBitmap(hdc, width, height),
+                delete_bitmap_object,
+            );
 
-        // 使用SelectObject函数将这个位图选择到DC中
-        SelectObject(*scope_guard_mem, (*scope_guard_h_bitmap).into());
+            // 使用SelectObject函数将这个位图选择到DC中
+            SelectObject(*scope_guard_mem, (*scope_guard_h_bitmap).into());
 
-        // 拷贝原始图像到内存
-        // 这里不需要缩放图片，所以直接使用BitBlt
-        // 如需要缩放，则使用 StretchBlt
-        BitBlt(
-            *scope_guard_mem,
-            0,
-            0,
-            width,
-            height,
-            Some(*scope_guard_hdc_desktop_window),
-            x,
-            y,
-            SRCCOPY,
-        )?;
+            // 拷贝原始图像到内存
+            // 这里不需要缩放图片，所以直接使用BitBlt
+            // 如需要缩放，则使用 StretchBlt
+            BitBlt(
+                *scope_guard_mem,
+                0,
+                0,
+                width,
+                height,
+                Some(hdc),
+                x,
+                y,
+                SRCCOPY,
+            )?;
 
-        to_rgba_image(*scope_guard_mem, *scope_guard_h_bitmap, width, height)
+            to_rgba_image(*scope_guard_mem, *scope_guard_h_bitmap, width, height)
+        };
+
+        if let Some(device_name) = device {
+            let hdc = CreateDCW(device_name, device_name, PCWSTR(ptr::null()), None);
+            let _scope_guard_hdc = guard(hdc, |val| {
+                if !DeleteDC(val).as_bool() {
+                    log::error!("DeleteDC({:?}) failed: {:?}", val, GetLastError());
+                }
+            });
+
+            capture_from_dc(hdc, x, y)
+        } else {
+            let hwnd = GetDesktopWindow();
+            let hdc = GetWindowDC(Some(hwnd));
+            let _scope_guard_hdc = guard(hdc, |val| {
+                if ReleaseDC(Some(hwnd), val) != 1 {
+                    log::error!("ReleaseDC({:?}) failed: {:?}", val, GetLastError());
+                }
+            });
+            capture_from_dc(hdc, x, y)
+        }
     }
 }
 
