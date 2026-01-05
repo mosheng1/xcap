@@ -65,6 +65,49 @@ fn to_rgba_image(
     bgra_to_rgba_image(width as u32, height as u32, buffer)
 }
 
+// 直接返回 BGRA 原始数据，不做颜色转换
+fn to_bgra_buffer(
+    hdc_mem: HDC,
+    h_bitmap: HBITMAP,
+    width: i32,
+    height: i32,
+) -> XCapResult<Vec<u8>> {
+    let buffer_size = width * height * 4;
+    let mut bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biSizeImage: buffer_size as u32,
+            biCompression: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut buffer = vec![0u8; buffer_size as usize];
+
+    unsafe {
+        let is_failed = GetDIBits(
+            hdc_mem,
+            h_bitmap,
+            0,
+            height as u32,
+            Some(buffer.as_mut_ptr().cast()),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        ) == 0;
+
+        if is_failed {
+            return Err(XCapError::new("Get BGRA data failed"));
+        }
+    };
+
+    Ok(buffer)
+}
+
 fn delete_bitmap_object(val: HBITMAP) {
     unsafe {
         let succeed = DeleteObject(val.into()).as_bool();
@@ -89,8 +132,6 @@ pub fn capture_device(
 ) -> XCapResult<RgbaImage> {
     unsafe {
         let capture_from_dc = |hdc: HDC, x: i32, y: i32| -> XCapResult<RgbaImage> {
-            // 内存中的HDC，使用 DeleteDC 函数释放
-            // https://learn.microsoft.com/zh-cn/windows/win32/api/wingdi/nf-wingdi-createcompatibledc
             let scope_guard_mem = guard(CreateCompatibleDC(Some(hdc)), |val| {
                 if !DeleteDC(val).as_bool() {
                     log::error!("DeleteDC({:?}) failed: {:?}", val, GetLastError());
@@ -102,12 +143,8 @@ pub fn capture_device(
                 delete_bitmap_object,
             );
 
-            // 使用SelectObject函数将这个位图选择到DC中
             SelectObject(*scope_guard_mem, (*scope_guard_h_bitmap).into());
 
-            // 拷贝原始图像到内存
-            // 这里不需要缩放图片，所以直接使用BitBlt
-            // 如需要缩放，则使用 StretchBlt
             BitBlt(
                 *scope_guard_mem,
                 0,
@@ -121,6 +158,66 @@ pub fn capture_device(
             )?;
 
             to_rgba_image(*scope_guard_mem, *scope_guard_h_bitmap, width, height)
+        };
+
+        if let Some(device_name) = device {
+            let hdc = CreateDCW(device_name, device_name, PCWSTR(ptr::null()), None);
+            let _scope_guard_hdc = guard(hdc, |val| {
+                if !DeleteDC(val).as_bool() {
+                    log::error!("DeleteDC({:?}) failed: {:?}", val, GetLastError());
+                }
+            });
+
+            capture_from_dc(hdc, x, y)
+        } else {
+            let hwnd = GetDesktopWindow();
+            let hdc = GetWindowDC(Some(hwnd));
+            let _scope_guard_hdc = guard(hdc, |val| {
+                if ReleaseDC(Some(hwnd), val) != 1 {
+                    log::error!("ReleaseDC({:?}) failed: {:?}", val, GetLastError());
+                }
+            });
+            capture_from_dc(hdc, x, y)
+        }
+    }
+}
+
+/// 捕获设备并返回原始 BGRA 数据（不做颜色转换）
+pub fn capture_device_raw(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    device: Option<PCWSTR>,
+) -> XCapResult<Vec<u8>> {
+    unsafe {
+        let capture_from_dc = |hdc: HDC, x: i32, y: i32| -> XCapResult<Vec<u8>> {
+            let scope_guard_mem = guard(CreateCompatibleDC(Some(hdc)), |val| {
+                if !DeleteDC(val).as_bool() {
+                    log::error!("DeleteDC({:?}) failed: {:?}", val, GetLastError());
+                }
+            });
+
+            let scope_guard_h_bitmap = guard(
+                CreateCompatibleBitmap(hdc, width, height),
+                delete_bitmap_object,
+            );
+
+            SelectObject(*scope_guard_mem, (*scope_guard_h_bitmap).into());
+
+            BitBlt(
+                *scope_guard_mem,
+                0,
+                0,
+                width,
+                height,
+                Some(hdc),
+                x,
+                y,
+                SRCCOPY,
+            )?;
+
+            to_bgra_buffer(*scope_guard_mem, *scope_guard_h_bitmap, width, height)
         };
 
         if let Some(device_name) = device {

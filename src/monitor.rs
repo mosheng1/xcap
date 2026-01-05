@@ -88,6 +88,11 @@ impl Monitor {
         self.impl_monitor.capture_image()
     }
 
+    /// Capture image and return raw BGRA data (no color conversion, faster)
+    pub fn capture_image_raw(&self) -> XCapResult<Vec<u8>> {
+        self.impl_monitor.capture_image_raw()
+    }
+
     pub fn capture_region(&self, x: u32, y: u32, width: u32, height: u32) -> XCapResult<RgbaImage> {
         self.impl_monitor.capture_region(x, y, width, height)
     }

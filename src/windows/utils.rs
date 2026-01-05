@@ -1,4 +1,5 @@
 use std::mem;
+use std::sync::OnceLock;
 
 use image::RgbaImage;
 use scopeguard::{ScopeGuard, guard};
@@ -25,6 +26,9 @@ use windows::{
 };
 
 use crate::{XCapError, error::XCapResult};
+
+// 缓存 OS 版本，避免重复读取注册表
+static OS_MAJOR_VERSION: OnceLock<u8> = OnceLock::new();
 
 pub(super) fn get_build_number() -> u32 {
     unsafe {
@@ -56,17 +60,19 @@ pub(super) fn get_build_number() -> u32 {
 }
 
 pub(super) fn get_os_major_version() -> u8 {
-    let build_number = get_build_number();
-    // https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions
-    if build_number >= 22000 {
-        11
-    } else if build_number >= 10240 {
-        10
-    } else if build_number >= 9200 {
-        8
-    } else {
-        7
-    }
+    *OS_MAJOR_VERSION.get_or_init(|| {
+        let build_number = get_build_number();
+        // https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions
+        if build_number >= 22000 {
+            11
+        } else if build_number >= 10240 {
+            10
+        } else if build_number >= 9200 {
+            8
+        } else {
+            7
+        }
+    })
 }
 
 pub(super) fn bgra_to_rgba(mut buffer: Vec<u8>) -> Vec<u8> {
@@ -79,6 +85,14 @@ pub(super) fn bgra_to_rgba(mut buffer: Vec<u8>) -> Vec<u8> {
         }
     }
 
+    buffer
+}
+
+// 快速 BGRA 转 RGBA，不检查旧版本（用于已知 Win8+ 的情况）
+pub(super) fn bgra_to_rgba_fast(mut buffer: Vec<u8>) -> Vec<u8> {
+    for src in buffer.chunks_exact_mut(4) {
+        src.swap(0, 2);
+    }
     buffer
 }
 

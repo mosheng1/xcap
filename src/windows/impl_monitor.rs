@@ -284,6 +284,21 @@ impl ImplMonitor {
         )
     }
 
+    /// 捕获图像并返回原始 BGRA 数据（不做颜色转换）
+    pub fn capture_image_raw(&self) -> XCapResult<Vec<u8>> {
+        let width = self.width()?;
+        let height = self.height()?;
+        let monitor_info_ex_w = get_monitor_info_ex_w(self.h_monitor)?;
+
+        super::capture::capture_device_raw(
+            0,
+            0,
+            width as i32,
+            height as i32,
+            Some(PCWSTR(monitor_info_ex_w.szDevice.as_ptr())),
+        )
+    }
+
     pub fn capture_region(&self, x: u32, y: u32, width: u32, height: u32) -> XCapResult<RgbaImage> {
         // Validate region bounds
         let monitor_width = self.width()?;
